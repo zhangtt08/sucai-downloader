@@ -10,6 +10,8 @@
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test scripts/check-downloads.cjs",
+    "verify-docs": "node scripts/verify-docs.mjs",
+    "verify": "npm run typecheck && npm test && npm run build && npm run verify-docs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5188 && electron . --dev\"",
     "package": "npm run build && electron-builder --win",
     "agent:serve": "node agent/server.mjs",

@@ -9,6 +9,11 @@ import path from 'node:path';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const START = Date.now();
 
+// 默认监听端口。必须与 agent/launch.json 的 ready_port 一致，否则 mcp-server.mjs
+// 自动拉起进程后按 ready_port..ready_port+11 轮询会找不到它（旧值 8790 就是这个错位）。
+// scripts/verify-docs.mjs 会核对这个常量与 README 里写的端口。
+export const DEFAULT_PORT = 8792;
+
 export class AgentError extends Error {
   constructor(code, message) {
     super(message);
@@ -114,7 +119,7 @@ export async function start({ port: wantPort, host = '127.0.0.1', label = 'agent
     server.listen(p, host, () => resolve(server.address().port));
   });
 
-  const port = await listen(wantPort || server.address()?.port || 8790, 12);
+  const port = await listen(wantPort || DEFAULT_PORT, 12);
   writeFileSync(endpointFile, `http://${host}:${port}\n`);
   console.log(`[agent] ${meta.name} v${meta.version} → http://${host}:${port} (${tools.length} tools)`);
   return { server, port, url: `http://${host}:${port}`, tools: tools.map(descriptor) };
