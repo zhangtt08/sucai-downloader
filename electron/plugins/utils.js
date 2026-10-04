@@ -1,7 +1,9 @@
 const fs = require('fs');
+const net = require('net');
 const https = require('https');
 const http = require('http');
 const { pipeline } = require('stream');
+const ssrf = require('../core/ssrf.cjs');
 
 // 浏览器化的取图头：实测芝加哥艺术馆的 IIIF 直链缺 Referer 会回 403 + HTML 错误页，
 // 只带 SucaiDownloader UA 也一样被拦；补上 Referer 后同一 URL 返回 200 image/jpeg。
@@ -82,10 +84,23 @@ function downloadFile(url, destPath, onProgress, options = {}) {
       fail(new Error('仅支持 HTTP 或 HTTPS 下载地址'));
       return;
     }
+    // ⚠ 字面量 IP 必须在这里就判：net.connect 看到主机名是 IP 时**根本不调用 lookup**，
+    // 只装 guardedLookup 的话 http://127.0.0.1:6379/ 会一路直通（第一版就是这么漏掉的）。
+    const literal = parsedUrl.hostname.replace(/^\[|\]$/g, '');
+    try {
+      if (net.isIP(literal)) ssrf.assertAddressAllowed(literal);
+    } catch (error) {
+      detachAbort();
+      fail(error);
+      return;
+    }
 
     const proto = parsedUrl.protocol === 'https:' ? https : http;
+    // lookup 是本项目的 SSRF 强制点：每一次 connect 用的都是"刚刚判定过"的那个地址，
+    // 重定向的每一跳都会重新走一遍 downloadFile → 重新判定，所以 302 跳内网连不上。
     request = proto.get(parsedUrl, {
       headers: headers || headersFor(parsedUrl.toString()),
+      lookup: ssrf.guardedLookup(),
     }, (res) => {
       if (signal?.aborted) { res.resume(); fail(new Error('下载已被取消')); return; }
       const statusCode = res.statusCode || 0;

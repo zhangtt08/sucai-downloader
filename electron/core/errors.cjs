@@ -100,6 +100,12 @@ const KINDS = {
     fix: 'settings',
     retryable: false,
   },
+  blocked_target: {
+    label: '目标地址被拒绝',
+    hint: '这条直链解析到本机内网地址（回环 / RFC1918 / 链路本地与云元数据端点 / 组播 / 保留段），下载器不会向它发起请求：请回到对应素材源重新搜索取直链，不要把内网地址当素材链接传进来。',
+    fix: 'switch_source',
+    retryable: false,
+  },
   unknown: {
     label: '未知错误',
     hint: '重试一次；若持续失败，换其他素材源。',
@@ -223,6 +229,11 @@ function classifyError(err, { source, status, needsKey, configured } = {}) {
   if (wantsKey && !hasKey) return new SourceError('no_key', '尚未配置 API Key', { source });
 
   const code = err && err.code ? String(err.code) : '';
+  // SSRF 边界拒绝是一类独立的失败：它不是网络故障，重试一百次也一样会被拒，
+  // 必须与 "connection refused" 分开，否则用户会以为是平台挂了。
+  if (code === 'ERR_SSRF_BLOCKED') {
+    return new SourceError('blocked_target', err.message, { source });
+  }
   if (!status && FS_CODES[code]) {
     const mapped = FS_CODES[code];
     return new SourceError(mapped.kind, `${mapped.message}（${code}）`, { source });

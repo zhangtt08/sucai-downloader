@@ -34,6 +34,30 @@ POST /api/agent/tool      唯一调用入口，body = {tool, input}
 
 ## 安全边界
 
-- 只绑 `127.0.0.1`，无远程访问。
+实现集中在 `electron/core/local-guard.cjs`（与 frameboost 的 `local-guard.ts` 同一套判据），
+`agent/server.mjs` 在每个请求解析 URL 之前先过它：
+
+- **只绑 `127.0.0.1`**：`listenLocal` 拒绝绑定到其他地址，端口被占会如实报原因（不再有空 catch）。
+- **Host 逐字回环白名单**：只接受 `127.0.0.1:<本服务端口>` / `localhost:<端口>` / `[::1]:<端口>`；
+  其余一律 403 JSON。判据是固定白名单，**绝不拿 Origin 去和请求自己的 Host 比** —— 那正是
+  DNS rebinding 的洞（页面把域名解析到 127.0.0.1 后两者自然相等）。
+- **Origin / Referer**：没带就放行（curl、node fetch、MCP 桥都不带）；带了就必须落在回环上，
+  外来 Origin（含 `null`、`file://`）一律 403。
+- **非 GET 需要本机令牌**：请求头 `x-sucai-token: <令牌>`（也接受 `Authorization: Bearer <令牌>`）。
+  令牌首次启动时生成到 `<userData>/agent-token`（POSIX 上 chmod 600；Windows 上真实隔离来自
+  它位于当前用户的 `%APPDATA%` 里，mode 位只是尽力而为），**不在仓库工作树内**。
+  用 `SUCAI_API_TOKEN` 可覆盖；`agent/mcp-server.mjs` 从同一个入口取值，所以桥照旧能直接用。
+- **永不发通配 CORS**：响应头里不会出现 `Access-Control-Allow-*`，`OPTIONS` 预检被显式拒绝 ——
+  能写盘的接口不欢迎任意网页发跨源 POST。
+- **下载目标受管**：直链先解析 DNS，解析结果落在回环 / RFC1918 / 链路本地与云元数据端点 /
+  组播 / 保留段就拒绝，重定向的每一跳都重查（`electron/core/ssrf.cjs`）。
 - 密钥只报"是否配置"，不出值。
 - 唯一写盘工具 `sucai.download` 标 `risk: exec`，缺 `confirm: true` 直接拒绝。
+
+## 调试时绕开守卫（只对本机回环有效）
+
+```bash
+set SUCAI_API_TOKEN=<读出来的令牌>      # 或者直接把请求发到 127.0.0.1:8792 并带上 x-sucai-token
+```
+
+Host / Origin 两道没有开关：伪造它们就是不该被服务。

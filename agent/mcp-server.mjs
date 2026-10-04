@@ -5,7 +5,11 @@
 import { spawn } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { createRequire } from 'node:module';
 import path from 'node:path';
+
+const require = createRequire(import.meta.url);
+const guard = require(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'electron', 'core', 'local-guard.cjs'));
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -13,6 +17,13 @@ const PROTOCOL = '2.2.0';
 const SERVER_INFO = { name: path.basename(PROJECT_ROOT) + '-agent-api', version: '1.0.0' };
 
 const log = (...a) => process.stderr.write(`[mcp] ${a.join(' ')}\n`);
+
+// 服务侧现在要求非 GET 带令牌。桥与服务器在同一台机器、同一个用户下，
+// 所以按同一个入口取令牌：env 优先，否则读那份 0600 的用户级令牌文件。
+function authHeaders() {
+  const token = guard.loadOrCreateToken({ create: false });
+  return token ? { [guard.TOKEN_HEADER]: token } : {};
+}
 
 function endpointFile() {
   const p = path.join(__dirname, '.endpoint');
@@ -22,7 +33,7 @@ function endpointFile() {
 async function rpc(base, method, params) {
   const res = await fetch(`${base}/api/agent/${method === 'tools/list' ? 'tools' : 'tool'}`, {
     method: method === 'tools/list' ? 'GET' : 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...authHeaders() },
     body: method === 'tools/list' ? undefined : JSON.stringify(params),
     signal: AbortSignal.timeout(120_000),
   });

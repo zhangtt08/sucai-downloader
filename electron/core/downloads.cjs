@@ -4,11 +4,15 @@
 'use strict';
 
 const fs = require('fs');
+const net = require('net');
 const path = require('path');
+const http = require('http');
+const https = require('https');
 const { getPlugin } = require('../plugins/registry');
 const { headersFor: browserHeaders } = require('../plugins/utils.js');
 const { classifyError, SourceError } = require('./errors.cjs');
 const { loadSettings, resolveUserDataDir } = require('./settings-store.cjs');
+const ssrf = require('./ssrf.cjs');
 
 const LOG_LIMIT = 300;
 const ILLEGAL = /[<>:"/\\|?*\u0000-\u001f]/g;
@@ -37,7 +41,14 @@ function stripTrailingExtension(value) {
   return String(value || '').replace(/\.(jpe?g|png|webp|gif|avif|tiff?|mp4|mov|webm)$/i, '');
 }
 
-// ---- URL 校验 ---------------------------------------------------------------
+// ---- URL 校验 -------------------------------------------------------------
+// 分两步，缺一不可：
+//   validateDownloadUrl（同步）：协议/主机名形状 + 字面 IP 的网段判定（10.0.0.5 这种不用查 DNS 就该拒）；
+//   assertTargetAllowed（异步）：解析 DNS 后按**解析结果**判定，然后交给传输层的 guardedLookup 复用。
+
+// 特殊用途主机名（RFC 6761）：它们按定义就落在本机/内网，不必查 DNS。
+const SPECIAL_USE_HOSTS = /^localhost$/i;
+const SPECIAL_USE_SUFFIXES = ['.localhost', '.local', '.internal', '.home.arpa', '.intranet', '.localdomain'];
 
 function validateDownloadUrl(rawUrl, { allowHttp = true } = {}) {
   const urlText = String(rawUrl || '').trim();
@@ -54,43 +65,59 @@ function validateDownloadUrl(rawUrl, { allowHttp = true } = {}) {
   if (!parsed.hostname || !/\./.test(parsed.hostname)) {
     throw new Error(`下载地址域名无效：${parsed.hostname || '(空)'}`);
   }
+  // 字面量 IP 与特殊用途主机名不用解析就能定性，先挡掉；
+  // 剩下"域名 → 解析结果"的那一半由 assertTargetAllowed 负责（异步，不可省）。
+  const bare = parsed.hostname.replace(/^\[|\]$/g, '');
+  if (net.isIP(bare)) ssrf.assertAddressAllowed(bare);
+  else if (SPECIAL_USE_HOSTS.test(bare) || SPECIAL_USE_SUFFIXES.some((suffix) => bare.toLowerCase().endsWith(suffix))) {
+    throw new Error(`下载地址指向本机/内网专用主机名：${parsed.hostname}（不会向它发起请求）`);
+  }
   return parsed;
 }
 
+// 下载/探活前的解析结果体检：抛出的错误带 code=ERR_SSRF_BLOCKED，归类成 blocked_target。
+async function assertTargetAllowed(url) {
+  const text = typeof url === 'string' ? url : String(url && url.toString ? url.toString() : url);
+  const { records } = await ssrf.assertUrlAllowed(text);
+  return records;
+}
+
 // 真实探活：HEAD 优先（省流量），平台多半不支持 HEAD，退化成 Range GET 首块。
+//
+// ⚠ 这里不用 fetch：fetch 不接受自定义 lookup，SSRF 判定就只能"先看字面主机名、连上之后再补一句"，
+// 而连上那一下已经是内网请求了。http/https + guardedLookup 让每一次 connect（含每一跳重定向）
+// 都用**刚刚判定过的那个地址**，DNS rebinding 与 302 跳内网都在这一步被挡下。
 async function probeUrl(rawUrl, timeoutMs = 12_000) {
-  const url = validateDownloadUrl(rawUrl);
   const started = Date.now();
-  const attempt = async (method, headers) => {
-    const response = await fetch(url, {
-      method,
-      headers: { ...browserHeaders(url), ...headers },
-      redirect: 'follow',
-      signal: AbortSignal.timeout(timeoutMs),
-    });
-    return response;
-  };
   try {
-    let response = await attempt('HEAD', {});
-    let bytes = readBytes(response);
-    let contentType = response.headers.get('content-type') || '';
+    const url = validateDownloadUrl(rawUrl);
+    const first = await guardedRequest(url.toString(), { method: 'HEAD', timeoutMs });
+    let status = first.statusCode;
+    let bytes = readBytesFromHeaders(first.headers);
+    let contentType = String(first.headers['content-type'] || '');
+    let finalUrl = first.url;
     // 不少图床（Pexels CDN 实测如此）对 HEAD 回 200 却不带 Content-Length / Content-Type，
     // 这时必须再用 Range GET 量一次，否则"探活成功"只给回一个 0 字节的没用事实。
-    if (!response.ok || !bytes || !contentType) {
-      const ranged = await attempt('GET', { Range: 'bytes=0-0' });
-      if (ranged.ok) response = ranged;
-      bytes = readBytes(ranged) || bytes;
-      if (!contentType) contentType = ranged.headers.get('content-type') || '';
+    if (status < 200 || status >= 300 || !bytes || !contentType) {
+      const ranged = await guardedRequest(url.toString(), {
+        method: 'GET',
+        timeoutMs,
+        headers: { Range: 'bytes=0-0' },
+      });
+      status = ranged.statusCode;
+      finalUrl = ranged.url;
+      bytes = readBytesFromHeaders(ranged.headers) || bytes;
+      if (!contentType) contentType = String(ranged.headers['content-type'] || '');
     }
     // HTTP 200 但内容是 HTML = 被风控/登录页拦下，不是可用的素材直链。
     const html = /text\/html|application\/xml/i.test(contentType);
     return {
-      ok: response.ok && !html,
-      status: response.status,
+      ok: status >= 200 && status < 300 && !html,
+      status,
       bytes: html ? 0 : bytes || 0,
       contentType,
       blockedByPlatform: html,
-      finalHost: safeHost(response.url || url.toString()),
+      finalHost: safeHost(finalUrl || url.toString()),
       ms: Date.now() - started,
       hint: html ? '平台返回的是网页而不是素材文件：直链多半已过期或被风控，请重新搜索该素材。' : undefined,
     };
@@ -108,8 +135,75 @@ function readBytes(response) {
   return Number(response.headers.get('content-length') || 0) || 0;
 }
 
+// 同一件事的裸对象版本（http/https 回调给的是普通 headers 对象，没有 .get()）。
+function readBytesFromHeaders(headers = {}) {
+  const range = String(headers['content-range'] || '');
+  const total = range.match(/\/(\d+)\s*$/);
+  if (total) return Number(total[1]) || 0;
+  return Number(headers['content-length'] || 0) || 0;
+}
+
 function safeHost(value) {
   try { return new URL(value).host; } catch (_) { return ''; }
+}
+
+// 一次经过 SSRF 判定的请求：跟随重定向，但每一跳都重新过 guardedLookup，
+// 所以 302 → 169.254.169.254、302 → 内网主机都连不上。响应头读完就丢弃，不落盘。
+function guardedRequest(target, { method = 'GET', headers = {}, timeoutMs = 12_000, hops = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    let parsed;
+    try {
+      parsed = new URL(String(target));
+    } catch (_) {
+      reject(new Error(`下载地址无法解析：${String(target).slice(0, 80)}`));
+      return;
+    }
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      reject(new Error(`仅支持 HTTP/HTTPS 直链，收到的是 ${parsed.protocol}`));
+      return;
+    }
+    if (hops > 5) {
+      reject(new Error('探活重定向次数过多'));
+      return;
+    }
+    // 字面量 IP 不经 lookup，这里先判一次（域名那一半由 guardedLookup 在 connect 前判）
+    const literal = parsed.hostname.replace(/^\[|\]$/g, '');
+    if (net.isIP(literal)) {
+      try {
+        ssrf.assertAddressAllowed(literal);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+    }
+    const transport = parsed.protocol === 'https:' ? https : http;
+    const request = transport.request(parsed, {
+      method,
+      headers: { ...browserHeaders(parsed.toString()), ...headers },
+      lookup: ssrf.guardedLookup(),
+      timeout: timeoutMs,
+    }, (response) => {
+      const status = response.statusCode || 0;
+      if (status >= 300 && status < 400 && response.headers.location) {
+        response.resume();
+        let next;
+        try {
+          next = new URL(response.headers.location, parsed);
+        } catch (_) {
+          reject(new Error('探活重定向地址无效'));
+          return;
+        }
+        guardedRequest(next.toString(), { method, headers, timeoutMs, hops: hops + 1 }).then(resolve, reject);
+        return;
+      }
+      const headersOut = response.headers;
+      response.resume();
+      resolve({ statusCode: status, headers: headersOut, url: parsed.toString() });
+    });
+    request.setTimeout(timeoutMs, () => request.destroy(new Error(`探活超时（${timeoutMs}ms）`)));
+    request.on('error', (error) => reject(error && error.code === 'ERR_SSRF_BLOCKED' ? error : classifyError(error)));
+    request.end();
+  });
 }
 
 // ---- 命名与目录 -------------------------------------------------------------
@@ -181,14 +275,58 @@ function ensureDir(dir) {
   return target;
 }
 
-function assertUsableTarget(target) {
+function assertUsableTarget(target, { destDir } = {}) {
   const base = path.basename(target);
   if (RESERVED.test(base)) throw new Error(`文件名 "${base}" 是系统保留名称，换一个文件名模板（例如加上 {id}）`);
   const normalized = path.resolve(target);
+  if (destDir) assertInsideDestDir(normalized, destDir);
   if (normalized.length > MAX_PATH) {
     throw new Error(`保存路径过长（${normalized.length} 字符，Windows 上限约 ${MAX_PATH}）：把下载目录换到更浅的位置，或缩短文件名模板`);
   }
   return normalized;
+}
+
+// 只比 path.resolve 之后的字符串前缀是不够的："D:\素材" 与 "D:\素材秘密" 前缀相同但不是同一个目录，
+// 必须补上分隔符再比；Windows 大小写不敏感，也要按小写比。
+function isInsideDir(child, parent) {
+  const caseInsensitive = process.platform === 'win32';
+  const lower = (value) => (caseInsensitive ? value.toLowerCase() : value);
+  const container = lower(path.resolve(parent));
+  const target = lower(path.resolve(child));
+  if (target === container) return true;
+  const prefix = container.endsWith(path.sep) ? container : `${container}${path.sep}`;
+  return target.startsWith(prefix);
+}
+
+// 把"已经存在的最深一段目录"换成真实路径，再把不存在的那几段拼回去：
+// 这样软链接/junction/8.3 短名都绕不出下载目录，而"目录还没建"也不会让体检失败。
+function realpathOfNearestAncestor(target) {
+  const absolute = path.resolve(target);
+  let current = absolute;
+  const tail = [];
+  for (let depth = 0; depth < 64; depth += 1) {
+    let real;
+    try {
+      real = fs.realpathSync(current);
+    } catch (_) {
+      const parsed = path.parse(current);
+      if (current === parsed.root) return absolute;
+      tail.unshift(path.basename(current));
+      current = parsed.dir;
+      continue;
+    }
+    return tail.length ? path.join(real, ...tail) : real;
+  }
+  return absolute;
+}
+
+function assertInsideDestDir(target, destDir) {
+  const container = realpathOfNearestAncestor(destDir);
+  const resolved = realpathOfNearestAncestor(target);
+  if (!isInsideDir(resolved, container)) {
+    throw new Error(`保存路径逃出了下载目录：${target} 不在 ${destDir} 里面（文件名或子目录模板里出现了 ../ 或绝对路径）`);
+  }
+  return resolved;
 }
 
 // 磁盘余量：statfsSync 在部分平台上不可用，读不到就返回 null（当作"无法预估"，不阻塞下载）。
@@ -256,8 +394,13 @@ function resolveTarget(item, destDir, { settings = {}, query = '', index = 0 } =
     .join(path.sep);
   const base = sanitizeSegment(applyTemplate(settings.filenameTemplate || DEFAULT_TEMPLATE, values), 120) || `${values.source}_${values.id}`;
   const dir = ensureDir(sub ? path.join(destDir, sub) : destDir);
+  // 子目录模板同样不许跑出下载目录（sanitizeSegment 已经去掉 / 与 ..，这里是不依赖它的第二道）
+  assertInsideDestDir(dir, destDir);
   const ext = extensionFor(item);
-  const target = uniquePath(assertUsableTarget(path.join(dir, `${base}${ext}`)));
+  const planned = assertUsableTarget(path.join(dir, `${base}${ext}`), { destDir });
+  // uniquePath 会往文件名里插 " (2)"，长度可能从 249 越过 250：
+  // 所以长度与边界体检必须在 uniquePath **之后**再做一次，不然这道检查是假的。
+  const target = assertUsableTarget(uniquePath(planned), { destDir });
   return target;
 }
 
@@ -297,6 +440,10 @@ async function downloadItem(item, { destDir, settings, query, index, onProgress,
     throw new SourceError('no_key', `${plugin.displayName} 尚未配置 API Key，无法下载`, { source: item.source });
   }
   const url = validateDownloadUrl(item.downloadUrl || item.previewUrl);
+  // 字面量看着是公网域名还不够：先解析一次，解析结果落在内网/元数据段就当场拒绝。
+  // （真正的强制点在传输层 —— utils.js 的 guardedLookup 会让每一次 connect 用刚判过的地址，
+  //   每一跳重定向都重判一次，这里这道只是把失败原因提前说清楚。）
+  await assertTargetAllowed(url);
   item = { ...item, downloadUrl: url.toString() };
 
   const target = resolveTarget(item, destDir || conf.downloadDir, { settings: conf, query, index });
@@ -570,6 +717,7 @@ function createDownloadQueue(items, { destDir, settings, query, concurrency, onE
 
 module.exports = {
   validateDownloadUrl,
+  assertTargetAllowed,
   probeUrl,
   downloadItem,
   createDownloadQueue,
@@ -579,6 +727,10 @@ module.exports = {
   uniquePath,
   sanitizeSegment,
   applyTemplate,
+  assertUsableTarget,
+  assertInsideDestDir,
+  isInsideDir,
+  realpathOfNearestAncestor,
   readDownloadLog,
   recordDownload,
   findRecentDownloads,

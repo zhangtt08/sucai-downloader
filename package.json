@@ -9,7 +9,7 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
-    "test": "node --test scripts/check-downloads.cjs",
+    "test": "node --test scripts/check-downloads.cjs \"tests/*.test.cjs\"",
     "verify-docs": "node scripts/verify-docs.mjs",
     "verify": "npm run typecheck && npm test && npm run build && npm run verify-docs",
     "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5188 && electron . --dev\"",
