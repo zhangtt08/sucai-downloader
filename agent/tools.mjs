@@ -11,12 +11,12 @@ import { AgentError } from './server.mjs';
 const require = createRequire(import.meta.url);
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const { initPluginRegistry, describeSources } = require(path.join(ROOT, 'electron/plugins/registry.js'));
+const { initPluginRegistry, describeSources, getPlugin } = require(path.join(ROOT, 'electron/plugins/registry.js'));
 const store = require(path.join(ROOT, 'electron/core/settings-store.cjs'));
 const searchCore = require(path.join(ROOT, 'electron/core/search.cjs'));
 const downloadCore = require(path.join(ROOT, 'electron/core/downloads.cjs'));
 const assetCache = require(path.join(ROOT, 'electron/core/asset-cache.cjs'));
-const { normalizeSearchInput, searchInputError } = require(path.join(ROOT, 'electron/core/input.cjs'));
+const { normalizeSearchInput, searchInputError, templateError } = require(path.join(ROOT, 'electron/core/input.cjs'));
 
 export const project = {
   name: 'sucai',
@@ -82,13 +82,18 @@ export const tools = [
     },
     risk: 'read',
     handler: async (input) => {
-      ready();
+      const settings = ready();
       const cached = assetCache.cachedSources();
-      const sources = describeSources().map((source) => ({ ...source, cachedAssets: cached[source.name] || 0 }));
+      const keyStates = store.redactSecrets(settings).apiKeys;
+      const sources = describeSources().map((source) => ({
+        ...source,
+        cachedAssets: cached[source.name] || 0,
+        keyLength: keyStates[source.name]?.length || 0,
+      }));
       const usable = sources.filter((source) => source.configured);
       return {
         settingsFile: store.settingsFile(),
-        downloadDir: store.loadSettings().downloadDir,
+        downloadDir: settings.downloadDir,
         total: sources.length,
         usableCount: usable.length,
         needsKeyCount: sources.filter((s) => s.needsKey && !s.configured).length,
@@ -213,7 +218,6 @@ export const tools = [
       let note = '';
       if (catalog.supportsById && catalog.configured) {
         try {
-          const { getPlugin } = require(path.join(ROOT, 'electron/plugins/registry.js'));
           asset = await getPlugin(source).fetchById(sourceId);
           live = true;
           assetCache.rememberAssets([asset], { query: '' });
@@ -288,16 +292,41 @@ export const tools = [
       }
       const destDir = str(input?.destDir, 260) || settings.downloadDir;
       if (!destDir) throw new AgentError('bad_input', '未设置下载目录：传 destDir 或在设置里选择下载位置');
+      // 命名模板在落盘那一刻才生效，等到下载失败已经太晚：界面与 Agent 用同一个校验。
+      const templateGuards = [
+        templateError(settings.filenameTemplate, { kind: 'filename' }),
+        templateError(settings.subfolderTemplate, { kind: 'subfolder' }),
+      ].filter(Boolean);
+      if (templateGuards.length) throw new AgentError('bad_input', `命名模板不合法：${templateGuards[0]}`);
+      // 同一素材在一次请求里重复出现：只下一份，并把重复的那几条如实报出去。
+      const deduped = [];
+      const seenKeys = new Set();
+      const duplicates = [];
+      for (const item of resolved) {
+        const key = `${item.source}_${item.sourceId}`;
+        if (seenKeys.has(key)) { duplicates.push(key); continue; }
+        seenKeys.add(key);
+        deduped.push(item);
+      }
+      resolved = deduped;
+      const repeats = downloadCore.findRecentDownloads(resolved.map((item) => ({ source: item.source, sourceId: item.sourceId })));
+      const freeSpace = downloadCore.diskSpace(destDir);
+      try {
+        downloadCore.assertDiskRoom(destDir, resolved);
+      } catch (error) {
+        throw new AgentError('no_space', error.message);
+      }
       const query = str(input?.query, 80);
-      const events = [];
+      const retries = [];
       const queue = downloadCore.createDownloadQueue(resolved, {
         destDir,
         settings,
         query,
         concurrency: input?.concurrency,
-        onEvent: (event) => { if (event.type !== 'progress') events.push(event); },
+        onEvent: (event) => { if (event.type === 'retry') retries.push({ task: event.taskId, attempt: event.attempt, error: event.error, hint: event.hint }); },
       });
       const summary = await queue.wait();
+      const freeAfter = downloadCore.diskSpace(destDir);
       return {
         destDir,
         requested: summary.requested + missing.length,
@@ -306,6 +335,10 @@ export const tools = [
         cancelled: summary.cancelled,
         bytes: summary.bytes,
         unresolved: missing,
+        duplicatesInRequest: duplicates,
+        alreadyDownloadedRecently: repeats.map((entry) => ({ source: entry.source, sourceId: entry.sourceId, filePath: entry.filePath, fileName: entry.fileName, at: entry.at, exists: entry.exists })),
+        retries,
+        disk: freeSpace ? { before: downloadCore.formatBytes(freeSpace.free), after: freeAfter ? downloadCore.formatBytes(freeAfter.free) : '' } : null,
         files: summary.files.map((file) => ({
           filePath: file.filePath,
           fileName: file.fileName,
@@ -320,7 +353,7 @@ export const tools = [
         concurrency: clampNumber(input?.concurrency || settings.maxConcurrentDownloads, 1, 4, 2),
         filenameTemplate: settings.filenameTemplate,
         subfolderTemplate: settings.subfolderTemplate,
-        note: 'files[].filePath 与 bytes 来自落盘后的 fs.stat，不是估值。',
+        note: 'files[].filePath 与 bytes 来自落盘后的 fs.stat，不是估值。alreadyDownloadedRecently 是提示，不拦下载；要只看没下过的，自己按 source+sourceId 过滤。',
       };
     },
   },

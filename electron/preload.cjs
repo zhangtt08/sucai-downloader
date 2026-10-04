@@ -24,9 +24,12 @@ contextBridge.exposeInMainWorld('electron', {
 
   getSettings: () => ipcRenderer.invoke('get-settings'),
   saveSettings: (s) => ipcRenderer.invoke('save-settings', s),
+  validateTemplate: (kind, value) => ipcRenderer.invoke('validate-template', { kind, value }),
   selectDirectory: () => ipcRenderer.invoke('select-directory'),
   getPlugins: () => ipcRenderer.invoke('get-plugins'),
   openInFolder: (fp) => ipcRenderer.invoke('open-in-folder', fp),
+  openDirectory: (dir) => ipcRenderer.invoke('open-directory', dir),
+  diskInfo: (dir) => ipcRenderer.invoke('disk-info', dir),
   windowControls: {
     minimize: () => ipcRenderer.invoke('window:minimize'),
     toggleMaximize: () => ipcRenderer.invoke('window:toggle-maximize'),

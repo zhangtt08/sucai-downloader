@@ -39,8 +39,8 @@ class GiphyPlugin extends SourcePlugin {
     }).filter((item) => item.downloadUrl);
   }
 
-  async download(item, destPath, onProgress) {
-    return downloadFile(item.downloadUrl, destPath, onProgress);
+  async download(item, destPath, onProgress, options) {
+    return downloadFile(item.downloadUrl, destPath, onProgress, options);
   }
 }
 

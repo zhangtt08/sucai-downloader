@@ -14,6 +14,7 @@ interface Props {
   groups: SourceGroup[];
   probes: Record<string, SourceProbe>;
   onProbe: (name: string) => void;
+  onProbeAll: () => Promise<{ checked: number; usable: number }>;
   onSearch: (query: string) => void;
   loading: boolean;
 }
@@ -34,9 +35,11 @@ const statusTone: Record<string, string> = {
 
 export function SearchBar({
   query, onQueryChange, mediaType, onMediaTypeChange, sources, onSourcesChange,
-  plugins, groups, probes, onProbe, onSearch, loading,
+  plugins, groups, probes, onProbe, onProbeAll, onSearch, loading,
 }: Props) {
   const [probing, setProbing] = useState<string[]>([]);
+  const [batchProbe, setBatchProbe] = useState<{ checked: number; usable: number } | null>(null);
+  const [probingAll, setProbingAll] = useState(false);
   const usable = plugins.filter((plugin) => plugin.configured);
 
   const toggleSource = (name: string) => {
@@ -51,6 +54,15 @@ export function SearchBar({
       await onProbe(name);
     } finally {
       setProbing((previous) => previous.filter((entry) => entry !== name));
+    }
+  };
+
+  const runProbeAll = async () => {
+    setProbingAll(true);
+    try {
+      setBatchProbe(await onProbeAll());
+    } finally {
+      setProbingAll(false);
     }
   };
 
@@ -103,6 +115,22 @@ export function SearchBar({
         <span className="filter-label">
           素材源 {sources.length}/{usable.length}
         </span>
+        <button
+          className="button-secondary button-small"
+          disabled={probingAll || sources.length === 0}
+          onClick={() => void runProbeAll()}
+          title="对勾选的每个源发一次最小请求，实测它此刻能不能用、慢不慢"
+          type="button"
+        >
+          {probingAll ? <span className="loading-ring" /> : <LayersIcon className="size-3.5" />}
+          {probingAll ? '检测中' : '检测可用性'}
+        </button>
+        {batchProbe && (
+          <span className="text-[11px] text-muted">
+            实测：{batchProbe.usable}/{batchProbe.checked} 个源此刻可用
+            {batchProbe.usable < batchProbe.checked ? '，失败的源在下方写明原因与下一步' : ''}
+          </span>
+        )}
 
         <div className="flex flex-wrap items-center gap-2">
           {plugins.map((plugin) => {

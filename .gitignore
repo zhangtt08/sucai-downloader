@@ -10,3 +10,6 @@ Thumbs.db
 desktop.ini
 *.lnk
 agent/.endpoint
+.env
+.env.*
+!.env.example

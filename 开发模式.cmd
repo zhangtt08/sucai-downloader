@@ -1,7 +1,7 @@
 @echo off
 rem ---------------------------------------------------------------------------
 rem Sucai dev launcher - vite with HMR plus the Electron shell in --dev mode.
-rem Electron waits for http://localhost:5173 before it opens its window.
+rem Electron waits for http://localhost:5188 before it opens its window.
 rem
 rem This does NOT package anything. For the built installer use:
 rem     release\

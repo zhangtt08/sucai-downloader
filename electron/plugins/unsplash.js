@@ -27,15 +27,16 @@ class UnsplashPlugin extends SourcePlugin {
     }));
   }
 
-  async download(item, destPath, onProgress) {
+  async download(item, destPath, onProgress, options = {}) {
     // 官方要求打一次 download 计数；这一步失败不该让已经拿到的直链下载失败。
+    if (options.signal?.aborted) throw new Error('下载已被取消');
     try {
       await fetch(`https://api.unsplash.com/photos/${item.sourceId}/download`, {
         headers: { 'User-Agent': 'Mozilla/5.0', Authorization: `Client-ID ${this.key}` },
         signal: AbortSignal.timeout(10_000),
       });
     } catch (_) {}
-    return downloadFile(item.downloadUrl || item.previewUrl, destPath, onProgress);
+    return downloadFile(item.downloadUrl || item.previewUrl, destPath, onProgress, options);
   }
 }
 

@@ -42,8 +42,8 @@ class MetPlugin extends SourcePlugin {
     return mapped;
   }
 
-  async download(item, destPath, onProgress) {
-    return downloadFile(item.downloadUrl, destPath, onProgress);
+  async download(item, destPath, onProgress, options) {
+    return downloadFile(item.downloadUrl, destPath, onProgress, options);
   }
 }
 

@@ -46,7 +46,8 @@ export default function App() {
 
   const needsSetup = loaded && search.plugins.length > 0 && !search.plugins.some((plugin) => plugin.configured);
 
-  const handleSelect = (item: AssetItem, multi: boolean) => {
+  // 这几个回调是缩略图卡片 memo 的依赖：身份稳定，勾选一项才只重画那一张。
+  const handleSelect = useCallback((item: AssetItem, multi: boolean) => {
     if (!multi) { setPreviewItem(item); return; }
     setSelected((previous) => {
       const next = new Set(previous);
@@ -54,7 +55,7 @@ export default function App() {
       if (next.has(key)) next.delete(key); else next.add(key);
       return next;
     });
-  };
+  }, []);
 
   const beginDownload = useCallback(async (items: AssetItem[], label = '') => {
     const unique = [...new Map(items.map((item) => [`${item.source}_${item.sourceId}`, item])).values()];
@@ -68,12 +69,33 @@ export default function App() {
     const started = await download.startDownload(batch, settings.downloadDir, search.query);
     if (started) setShowDownloads(true);
     return started;
-  }, [download, settings.downloadDir, search.query]);
+  }, [download.startDownload, settings.downloadDir, search.query]);
+
+  const downloadOne = useCallback((item: AssetItem) => { void beginDownload([item]); }, [beginDownload]);
+  const downloadMany = useCallback((items: AssetItem[]) => { void beginDownload(items); }, [beginDownload]);
 
   const selectedItems = useMemo(
     () => search.items.filter((item) => selected.has(`${item.source}_${item.sourceId}`)),
     [search.items, selected],
   );
+
+  const allVisibleSelected = search.items.length > 0 && selectedItems.length === search.items.length;
+
+  const toggleSelectAllVisible = () => {
+    if (allVisibleSelected) {
+      setSelected((previous) => {
+        const next = new Set(previous);
+        search.items.forEach((item) => next.delete(`${item.source}_${item.sourceId}`));
+        return next;
+      });
+      return;
+    }
+    setSelected((previous) => {
+      const next = new Set(previous);
+      search.items.forEach((item) => next.add(`${item.source}_${item.sourceId}`));
+      return next;
+    });
+  };
 
   const handleDownloadSelected = async () => {
     if (await beginDownload(selectedItems, 'selected')) setSelected(new Set());
@@ -141,6 +163,7 @@ export default function App() {
         mediaType={search.mediaType}
         onMediaTypeChange={(value) => search.setMediaType(value as 'image' | 'video' | 'all')}
         onProbe={search.checkSource}
+        onProbeAll={() => search.probeAll()}
         onQueryChange={search.setQuery}
         onSearch={search.search}
         onSourcesChange={search.setSources}
@@ -182,14 +205,15 @@ export default function App() {
               loading={search.loading}
               noResultReason={search.noResultReason}
               onDedupeChange={search.setDedupe}
-              onDownload={(item) => void beginDownload([item])}
-              onDownloadMany={(items) => void beginDownload(items)}
+              onDownload={downloadOne}
+              onDownloadMany={downloadMany}
               onLoadMore={search.loadMore}
               onOpenSettings={() => setShowSettings(true)}
               onOrientationChange={search.setOrientation}
               onProbe={search.checkSource}
               onRetrySource={search.retrySource}
               onSelect={handleSelect}
+              onSelectAllVisible={toggleSelectAllVisible}
               onlySource={search.onlySource}
               onOnlySourceChange={search.setOnlySource}
               orientation={search.orientation}
@@ -198,6 +222,7 @@ export default function App() {
               searched={search.searched}
               selected={selected}
               totalItems={search.totalItems}
+              allVisibleSelected={allVisibleSelected}
             />
           )}
         </section>
@@ -251,10 +276,13 @@ export default function App() {
         <DownloadPanel
           concurrency={settings.maxConcurrentDownloads}
           downloadDir={settings.downloadDir}
+          lastSummary={download.lastSummary}
           logInfo={history}
+          notice={download.notice}
           onCancel={download.cancel}
           onClear={download.clearSettled}
           onClose={() => setShowDownloads(false)}
+          onOpenDownloadDir={(dir) => void download.openDownloadDir(dir)}
           onOpenFolder={download.openFolder}
           onOpenSettings={() => setShowSettings(true)}
           onPause={download.pause}

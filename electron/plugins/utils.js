@@ -1,6 +1,7 @@
 const fs = require('fs');
 const https = require('https');
 const http = require('http');
+const { pipeline } = require('stream');
 
 // 浏览器化的取图头：实测芝加哥艺术馆的 IIIF 直链缺 Referer 会回 403 + HTML 错误页，
 // 只带 SucaiDownloader UA 也一样被拦；补上 Referer 后同一 URL 返回 200 image/jpeg。
@@ -23,46 +24,87 @@ function looksLikeHtml(contentType) {
   return /text\/html|application\/xml/i.test(String(contentType || ''));
 }
 
-function downloadFile(url, destPath, onProgress, redirectCount = 0, headers = null) {
+const CONNECT_TIMEOUT_MS = 30_000;
+const activeTargets = new Set();
+
+/**
+ * 直传落盘：先写 .part，成功且非空才 rename 成正式文件（原子替换，失败的半成品一律删掉）。
+ * @param {string} url
+ * @param {string} destPath 正式文件路径
+ * @param {(p:{percent:number,speed:string,bytes:number,total:number})=>void} [onProgress]
+ * @param {{redirectCount?:number, headers?:object|null, signal?:AbortSignal|null}} [options]
+ */
+function downloadFile(url, destPath, onProgress, options = {}) {
+  const redirectCount = options.redirectCount || 0;
+  const headers = options.headers || null;
+  const signal = options.signal || null;
+
   if (!url) return Promise.reject(new Error('下载地址为空'));
   if (redirectCount > 5) return Promise.reject(new Error('下载重定向次数过多'));
+  if (!redirectCount && activeTargets.has(destPath)) return Promise.reject(new Error('该保存路径正在下载，请完成后再试'));
+  if (!redirectCount) activeTargets.add(destPath);
 
   return new Promise((resolve, reject) => {
     const tempPath = `${destPath}.part`;
     let settled = false;
+    let request = null;
+    let file = null;
+    const detachAbort = () => { signal?.removeEventListener('abort', onAbort); };
     const fail = (error) => {
       if (settled) return;
       settled = true;
-      try { fs.rmSync(tempPath, { force: true }); } catch (_) {}
-      reject(error instanceof Error ? error : new Error(String(error)));
+      detachAbort();
+      try { if (request) request.destroy(); } catch (_) {}
+      const cleanup = () => {
+        if (file) { try { fs.rmSync(tempPath, { force: true }); } catch (_) {} }
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      if (file && !file.closed) { file.once('close', cleanup); file.destroy(); }
+      else cleanup();
     };
+    // 取消信号：立刻断连接并清掉 .part，不留"下载中"的僵尸行。
+    const onAbort = () => fail(new Error('下载已被取消'));
+    if (signal) {
+      if (signal.aborted) { fail(new Error('下载已被取消')); return; }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
 
     let parsedUrl;
     try {
       parsedUrl = new URL(url);
     } catch {
+      detachAbort();
       fail(new Error('下载地址无效'));
       return;
     }
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      detachAbort();
       fail(new Error('仅支持 HTTP 或 HTTPS 下载地址'));
       return;
     }
 
     const proto = parsedUrl.protocol === 'https:' ? https : http;
-    const request = proto.get(parsedUrl, {
+    request = proto.get(parsedUrl, {
       headers: headers || headersFor(parsedUrl.toString()),
     }, (res) => {
+      if (signal?.aborted) { res.resume(); fail(new Error('下载已被取消')); return; }
       const statusCode = res.statusCode || 0;
       if (statusCode >= 300 && statusCode < 400 && res.headers.location) {
         res.resume();
-        const redirectUrl = new URL(res.headers.location, parsedUrl).toString();
+        let redirectUrl;
+        try { redirectUrl = new URL(res.headers.location, parsedUrl).toString(); }
+        catch { fail(new Error('下载重定向地址无效')); return; }
         settled = true;
-        downloadFile(redirectUrl, destPath, onProgress, redirectCount + 1).then(resolve, reject);
+        detachAbort();
+        downloadFile(redirectUrl, destPath, onProgress, { redirectCount: redirectCount + 1, headers, signal }).then(resolve, reject);
         return;
       }
       if (statusCode < 200 || statusCode >= 300) {
-        const why = statusCode === 403 ? '（被平台拒绝：可能缺少 Referer/UA，或该素材不允许直接下载）' : '';
+        const why = statusCode === 403
+          ? '（被平台拒绝：可能缺少 Referer/UA，或该素材不允许直接下载）'
+          : statusCode === 429
+            ? '（平台限速：稍后再重试这一批，或先下载其他来源）'
+            : '';
         res.resume();
         fail(new Error(`下载请求失败（HTTP ${statusCode || '未知'}）${why}`));
         return;
@@ -77,39 +119,39 @@ function downloadFile(url, destPath, onProgress, redirectCount = 0, headers = nu
       let downloaded = 0;
       const start = Date.now();
       let lastReport = 0;
-      const file = fs.createWriteStream(tempPath);
-      file.on('error', fail);
-      res.on('error', fail);
+      file = fs.createWriteStream(tempPath);
       res.on('data', (chunk) => {
         downloaded += chunk.length;
-        if (onProgress && total > 0 && Date.now() - lastReport > 120) {
+        if (onProgress && Date.now() - lastReport > 120) {
           lastReport = Date.now();
-          const pct = Math.round((downloaded / total) * 100);
           const elapsedSeconds = (Date.now() - start) / 1000;
           onProgress({
-            percent: pct,
+            percent: total > 0 ? Math.min(99, Math.round((downloaded / total) * 100)) : 0,
             speed: elapsedSeconds > 0 ? formatSpeed(downloaded / elapsedSeconds) : '计算中',
+            bytes: downloaded,
+            total: total || 0,
           });
         }
       });
-      file.on('finish', () => {
-        file.close((closeError) => {
-          if (closeError) return fail(closeError);
+      pipeline(res, file, (transferError) => {
+          if (settled) return;
+          detachAbort();
+          if (transferError) return fail(transferError);
+          if (signal?.aborted) return fail(new Error('下载已被取消'));
           try {
             if (!fs.statSync(tempPath).size) return fail(new Error('下载内容为空文件'));
+            if (total > 0 && downloaded !== total) return fail(new Error('下载内容不完整，请重试'));
             fs.renameSync(tempPath, destPath);
             settled = true;
             resolve(destPath);
           } catch (error) {
             fail(error);
           }
-        });
       });
-      res.pipe(file);
     });
-    request.setTimeout(30_000, () => request.destroy(new Error('下载连接超时')));
+    request.setTimeout(CONNECT_TIMEOUT_MS, () => request.destroy(new Error('下载连接超时')));
     request.on('error', fail);
-  });
+  }).finally(() => { if (!redirectCount) activeTargets.delete(destPath); });
 }
 
 function formatSpeed(bps) {

@@ -55,13 +55,17 @@ async function runSourceSearch(name, { query, mediaType, page, perPage }) {
 
   let attempt = 0;
   let lastError = null;
+  // 走到这里说明密钥已经有了（没有的在上面就抛 no_key 了），
+  // 所以 403 的成因只可能是"密钥无效"或"被平台拦截"，不能再报成"缺密钥"。
+  const needsKey = !!(SOURCE_BY_NAME.get(name) || {}).needsKey;
+  const classify = (error) => classifyError(error, { source: name, needsKey, configured: true });
   while (attempt < 2) {
     attempt += 1;
     try {
       const items = await plugin.search(query, mediaType, page, perPage);
       return Array.isArray(items) ? items : [];
     } catch (error) {
-      lastError = classifyError(error, { source: name, needsKey: false });
+      lastError = classify(error);
       if (NON_RETRYABLE.has(lastError.kind) || attempt >= 2) break;
       await new Promise((resolve) => setTimeout(resolve, RETRY_DELAY_MS));
     }

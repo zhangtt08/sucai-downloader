@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { AssetItem } from '../services/types';
 import { CheckIcon, DownloadIcon, VideoIcon } from './Icons';
 
@@ -9,7 +10,9 @@ export const fallbackImage = `data:image/svg+xml,${encodeURIComponent(`
   </svg>
 `)}`;
 
-export function AssetCard({
+// 一次搜索聚合出来的条目很容易上百张。勾选/取勾只该让变化的那两张重画，
+// 所以卡片整体 memo —— 没有它，选中一项会把整屏几百张卡片全部重渲染一遍。
+export const AssetCard = memo(function AssetCard({
   item,
   selected,
   onSelect,
@@ -83,7 +86,7 @@ export function AssetCard({
       </button>
     </article>
   );
-}
+});
 
 export function AssetGrid({
   items,

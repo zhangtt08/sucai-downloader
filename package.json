@@ -9,7 +9,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "typecheck": "tsc --noEmit",
-    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron . --dev\"",
+    "test": "node --test scripts/check-downloads.cjs",
+    "electron:dev": "concurrently \"vite\" \"wait-on http://localhost:5188 && electron . --dev\"",
     "package": "npm run build && electron-builder --win",
     "agent:serve": "node agent/server.mjs",
     "agent:mcp": "node agent/mcp-server.mjs"

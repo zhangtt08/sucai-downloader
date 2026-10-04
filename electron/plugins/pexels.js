@@ -59,8 +59,8 @@ class PexelsPlugin extends SourcePlugin {
     return results;
   }
 
-  async download(item, destPath, onProgress) {
-    return downloadFile(item.downloadUrl, destPath, onProgress);
+  async download(item, destPath, onProgress, options) {
+    return downloadFile(item.downloadUrl, destPath, onProgress, options);
   }
 }
 

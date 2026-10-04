@@ -186,6 +186,15 @@ export function useSearch() {
     }
   }, []);
 
+  // 首屏就能"一次点出所有勾选源的真实可用性"，和 Agent 的 sucai.sources.probe 同一份实现。
+  const probeAll = useCallback(async (names?: string[]) => {
+    const targets = (names && names.length ? names : inputRef.current.sources).filter(Boolean);
+    if (!targets.length) return { checked: 0, usable: 0 };
+    const results = await Promise.all(targets.map((name) => checkSource(name)));
+    const usable = results.filter((probe) => probe.status === 'ok').length;
+    return { checked: results.length, usable };
+  }, [checkSource]);
+
   const visibleItems = useMemo(() => items.filter((item) => {
     if (onlySource && item.source !== onlySource) return false;
     if (orientation !== 'all' && orientationOf(item) !== orientation) return false;
@@ -227,7 +236,7 @@ export function useSearch() {
     items: visibleItems, totalItems: items.length, grouped, displayGroups,
     loading, error, searched, hasMore, deduped, noResultReason,
     orientation, setOrientation, onlySource, setOnlySource, dedupe, setDedupe,
-    search, loadMore, retrySource, checkSource,
+    search, loadMore, retrySource, checkSource, probeAll,
     pageSize: PAGE_SIZE,
   };
 }

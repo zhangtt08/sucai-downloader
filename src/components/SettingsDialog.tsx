@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
-import { selectDirectory } from '../services/ipc';
-import type { AppSettings, PluginInfo } from '../services/types';
+import { selectDirectory, validateTemplate } from '../services/ipc';
+import type { AppSettings, KeyName, PluginInfo, SettingsUpdate } from '../services/types';
 import {
   AlertIcon,
   CheckIcon,
@@ -12,13 +12,14 @@ import {
   MoonIcon,
   SettingsIcon,
   SunIcon,
+  TrashIcon,
   XIcon,
 } from './Icons';
 
 interface Props {
   settings: AppSettings;
   plugins: PluginInfo[];
-  onSave: (settings: AppSettings) => Promise<void>;
+  onSave: (update: SettingsUpdate) => Promise<unknown>;
   onClose: () => void;
   onProbe: (name: string) => Promise<unknown>;
 }
@@ -41,9 +42,13 @@ const SUBDIRS = [
 export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: Props) {
   const [local, setLocal] = useState<AppSettings>({
     ...settings,
-    apiKeys: { ...settings.apiKeys },
     enabledSources: [...settings.enabledSources],
   });
+  // 界面只有"这次新敲进去的值"，已存的密钥从主进程就拿不到，自然也回显不了。
+  const [keyDraft, setKeyDraft] = useState<Partial<Record<KeyName, string>>>({});
+  const [openKey, setOpenKey] = useState<KeyName | null>(null);
+  const [templateHint, setTemplateHint] = useState('');
+  const [subdirHint, setSubdirHint] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [probing, setProbing] = useState<string[]>([]);
@@ -57,8 +62,21 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [onClose, saving]);
 
+  // 校验函数只有一份：界面调用的就是主进程保存时用的同一个实现。
+  useEffect(() => {
+    let cancelled = false;
+    void validateTemplate('filename', local.filenameTemplate).then((message) => {
+      if (!cancelled) setTemplateHint(message);
+    });
+    void validateTemplate('subfolder', local.subfolderTemplate).then((message) => {
+      if (!cancelled) setSubdirHint(message);
+    });
+    return () => { cancelled = true; };
+  }, [local.filenameTemplate, local.subfolderTemplate]);
+
   const keySources = plugins.filter((plugin) => plugin.needsKey);
   const keylessSources = plugins.filter((plugin) => !plugin.needsKey);
+  const invalidTemplate = !!templateHint || !!subdirHint;
 
   const chooseDirectory = async () => {
     const directory = await selectDirectory();
@@ -91,10 +109,12 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
   };
 
   const save = async () => {
+    if (invalidTemplate) { setError(templateHint || subdirHint); return; }
     setSaving(true);
     setError('');
     try {
-      await onSave(local);
+      const { apiKeys: _neverStored, ...rest } = local;
+      await onSave({ ...rest, apiKeyInput: keyDraft });
       onClose();
     } catch (saveError: unknown) {
       setError(saveError instanceof Error ? saveError.message : '设置保存失败');
@@ -131,52 +151,89 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
               <KeyIcon className="size-4" />
               <div>
                 <h3>素材平台密钥</h3>
-                <p>密钥只保存在这台电脑的本机设置文件里，不入库、不上传。可双击「探测」验证是否真的可用。</p>
+                <p>密钥只保存在这台电脑的本机设置文件里，不入库、不上传；界面上不显示已存内容，只显示「已配置」与长度。</p>
               </div>
             </div>
             <div className="mt-4 space-y-3">
-              {keySources.map((plugin) => (
-                <div className="setting-field" key={plugin.name}>
-                  <div className="flex items-center justify-between gap-3">
-                    <label htmlFor={`api-${plugin.name}`}>
-                      {plugin.displayName}
-                      <span>{plugin.keyHint}</span>
-                    </label>
-                    <div className="flex items-center gap-1">
-                      <button
-                        className="text-link inline-flex items-center gap-1"
-                        disabled={probing.includes(plugin.name)}
-                        onClick={() => void probe(plugin.name)}
-                        type="button"
-                      >
-                        {probing.includes(plugin.name) ? <span className="loading-ring" /> : <LayersIcon className="size-3" />}
-                        探测
-                      </button>
-                      <a className="external-link" href={plugin.keyUrl} rel="noreferrer" target="_blank">
-                        获取密钥
-                        <ExternalLinkIcon className="size-3" />
-                      </a>
+              {keySources.map((plugin) => {
+                const state = settings.apiKeys[plugin.name as KeyName];
+                const draft = keyDraft[plugin.name as KeyName] ?? '';
+                const editing = openKey === plugin.name || !state?.configured;
+                return (
+                  <div className="setting-field" key={plugin.name}>
+                    <div className="flex items-center justify-between gap-3">
+                      <label htmlFor={`api-${plugin.name}`}>
+                        {plugin.displayName}
+                        <span>{plugin.keyHint}</span>
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <span className={`key-state ${state?.configured ? 'key-state-on' : ''}`}>
+                          <CheckIcon className="size-3" />
+                          {state?.configured ? `已配置 · ${state.length} 位` : '未配置'}
+                        </span>
+                        <button
+                          className="text-link inline-flex items-center gap-1"
+                          disabled={probing.includes(plugin.name)}
+                          onClick={() => void probe(plugin.name)}
+                          type="button"
+                        >
+                          {probing.includes(plugin.name) ? <span className="loading-ring" /> : <LayersIcon className="size-3" />}
+                          探测
+                        </button>
+                        <a className="external-link" href={plugin.keyUrl} rel="noreferrer" target="_blank">
+                          获取密钥
+                          <ExternalLinkIcon className="size-3" />
+                        </a>
+                      </div>
                     </div>
+                    {editing ? (
+                      <>
+                        <input
+                          autoComplete="off"
+                          id={`api-${plugin.name}`}
+                          onChange={(event) => setKeyDraft((current) => ({ ...current, [plugin.name]: event.target.value }))}
+                          placeholder={`粘贴 ${plugin.displayName} ${plugin.keyHint}`}
+                          spellCheck={false}
+                          type="text"
+                          value={draft}
+                        />
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          <button
+                            className="button-secondary button-small"
+                            onClick={() => { setOpenKey(null); setKeyDraft((current) => { const next = { ...current }; delete next[plugin.name as KeyName]; return next; }); }}
+                            type="button"
+                          >
+                            取消改动
+                          </button>
+                          {state?.configured && (
+                            <button
+                              className="text-link inline-flex items-center gap-1"
+                              onClick={() => { setKeyDraft((current) => ({ ...current, [plugin.name as KeyName]: '' })); setOpenKey(plugin.name as KeyName); }}
+                              type="button"
+                            >
+                              <TrashIcon className="size-3" />
+                              清除本机密钥
+                            </button>
+                          )}
+                          {keyDraft[plugin.name as KeyName] === '' && state?.configured && (
+                            <span className="text-[11px] text-warning">保存后将删除这一源的密钥</span>
+                          )}
+                        </div>
+                      </>
+                    ) : (
+                      <button className="text-link mt-2 inline-flex items-center gap-1" onClick={() => setOpenKey(plugin.name as KeyName)} type="button">
+                        <KeyIcon className="size-3" />
+                        更换密钥
+                      </button>
+                    )}
+                    {probeResult[plugin.name] && (
+                      <p className={`mt-1.5 text-[11px] leading-4 ${probeResult[plugin.name].startsWith('可用') ? 'text-success' : 'text-danger'}`}>
+                        {probeResult[plugin.name]}
+                      </p>
+                    )}
                   </div>
-                  <input
-                    autoComplete="off"
-                    id={`api-${plugin.name}`}
-                    onChange={(event) => {
-                      const key = plugin.name as keyof AppSettings['apiKeys'];
-                      const value = event.target.value;
-                      setLocal((current) => ({ ...current, apiKeys: { ...current.apiKeys, [key]: value } }));
-                    }}
-                    placeholder={`粘贴 ${plugin.displayName} ${plugin.keyHint}`}
-                    type="password"
-                    value={local.apiKeys[plugin.name as keyof AppSettings['apiKeys']] ?? ''}
-                  />
-                  {probeResult[plugin.name] && (
-                    <p className={`mt-1.5 text-[11px] leading-4 ${probeResult[plugin.name].startsWith('可用') ? 'text-success' : 'text-danger'}`}>
-                      {probeResult[plugin.name]}
-                    </p>
-                  )}
-                </div>
-              ))}
+                );
+              })}
               {keySources.length === 0 && <p className="text-xs text-muted">没有需要密钥的素材源。</p>}
             </div>
           </section>
@@ -231,6 +288,7 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
                   <span>不含扩展名</span>
                 </label>
                 <input
+                  aria-invalid={!!templateHint}
                   id="filename-template"
                   list="template-options"
                   onChange={(event) => setLocal((current) => ({ ...current, filenameTemplate: event.target.value }))}
@@ -240,7 +298,14 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
                 <datalist id="template-options">
                   {TEMPLATES.map((template) => <option key={template} value={template} />)}
                 </datalist>
-                <p className="mt-1.5 text-[11px] text-muted">示例：artic_656_Lion (One of a Pair).jpg</p>
+                {templateHint ? (
+                  <p className="mt-1.5 flex items-start gap-1.5 text-[11px] leading-4 text-danger" role="alert">
+                    <AlertIcon className="size-3.5 shrink-0" />
+                    {templateHint}
+                  </p>
+                ) : (
+                  <p className="mt-1.5 text-[11px] text-muted">示例：artic_656_Lion (One of a Pair).jpg</p>
+                )}
               </div>
 
               <div className="setting-field">
@@ -249,6 +314,7 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
                   <span>在下载目录内再分层</span>
                 </label>
                 <select
+                  aria-invalid={!!subdirHint}
                   className="setting-select"
                   id="subdir-template"
                   onChange={(event) => setLocal((current) => ({ ...current, subfolderTemplate: event.target.value }))}
@@ -256,7 +322,9 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
                 >
                   {SUBDIRS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}
                 </select>
-                <p className="mt-1.5 text-[11px] text-muted">冲突文件名会自动追加 (1)、(2)，不会覆盖已有素材。</p>
+                <p className="mt-1.5 text-[11px] text-muted">
+                  {subdirHint || '冲突文件名会自动追加 (1)、(2)，不会覆盖已有素材。'}
+                </p>
               </div>
 
               <div className="setting-field">
@@ -331,12 +399,18 @@ export function SettingsDialog({ settings, plugins, onSave, onClose, onProbe }: 
         </div>
 
         <div className="modal-footer">
-          <span className="mr-auto flex items-center gap-1.5 text-[11px] text-muted">
-            <DownloadIcon className="size-3.5" />
-            保存后立即生效，Agent 接口读的是同一份设置
+          <span className="mr-auto flex min-w-0 items-center gap-1.5 text-[11px] text-muted">
+            <DownloadIcon className="size-3.5 shrink-0" />
+            <span className="truncate">保存后立即生效，Agent 接口读的是同一份设置</span>
           </span>
           <button className="button-secondary" disabled={saving} onClick={onClose} type="button">取消</button>
-          <button className="button-primary min-w-[102px] justify-center" disabled={saving} onClick={save} type="button">
+          <button
+            className="button-primary min-w-[102px] justify-center"
+            disabled={saving || invalidTemplate}
+            onClick={save}
+            title={invalidTemplate ? '先把模板改对再保存' : undefined}
+            type="button"
+          >
             {saving && <span className="loading-ring loading-ring-light" />}
             {saving ? '保存中' : '保存设置'}
           </button>

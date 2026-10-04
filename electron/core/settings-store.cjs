@@ -90,9 +90,26 @@ function settingsFile() {
   return path.join(resolveUserDataDir(), 'settings.json');
 }
 
-function sanitizeSettings(raw) {
+const MAX_KEY_LENGTH = 300;
+
+function sanitizeSettings(raw, context = {}) {
+  // 密钥只有三个来源：① 本次显式提交的 apiKeyInput（含"清空"用的空串）
+  // ② 磁盘上已有的值 ③ 默认空串。界面回传的脱敏视图（{configured,length}）
+  // 永远不能当密钥本体写盘 —— 那会把用户已有的 key 变成 "[object Object]"。
+  const stored = context.existingKeys && typeof context.existingKeys === 'object'
+    ? context.existingKeys
+    : (raw?.apiKeys && typeof raw.apiKeys === 'object' ? raw.apiKeys : {});
+  const input = raw?.apiKeyInput && typeof raw.apiKeyInput === 'object' ? raw.apiKeyInput : null;
   const apiKeys = {};
-  for (const name of KEY_NAMES) apiKeys[name] = String(raw?.apiKeys?.[name] ?? DEFAULTS.apiKeys[name] ?? '').trim();
+  for (const name of KEY_NAMES) {
+    const provided = input ? input[name] : undefined;
+    if (provided !== undefined) {
+      apiKeys[name] = String(provided).replace(/[\r\n\t]/g, '').trim().slice(0, MAX_KEY_LENGTH);
+      continue;
+    }
+    const current = stored[name];
+    apiKeys[name] = typeof current === 'string' ? current.replace(/[\r\n\t]/g, '').trim() : '';
+  }
   const clamp = (value, min, max, fallback) => {
     const n = Number(value);
     if (!Number.isFinite(n)) return fallback;
@@ -115,6 +132,21 @@ function sanitizeSettings(raw) {
   };
 }
 
+// 保存前的显式体检：含换行的 key 会让 fetch 直接报 "Invalid character in header content"，
+// 用户看到的是一句和密钥无关的怪话，所以这一步宁可当场拒绝。
+function apiKeyInputError(name, value) {
+  const label = SOURCE_BY_NAME.get(name)?.displayName || name;
+  if (value === undefined || value === null) return '';
+  const text = String(value);
+  if (text === '') return '';
+  if (/[\r\n\t]/.test(text)) return `${label} 的密钥里含有换行或制表符：请只粘贴密钥本身。`;
+  const trimmed = text.trim();
+  if (trimmed.length < 6) return `${label} 的密钥只有 ${trimmed.length} 个字符，多半是复制不全：请重新整段复制。`;
+  if (trimmed.length > MAX_KEY_LENGTH) return `${label} 的密钥超过 ${MAX_KEY_LENGTH} 个字符：请确认没有把整页内容一起粘进来。`;
+  if (/^https?:\/\//i.test(trimmed)) return `${label} 的密钥看起来是一个网址而不是密钥。`;
+  return '';
+}
+
 function loadSettings(file = settingsFile()) {
   try {
     if (fs.existsSync(file)) return sanitizeSettings(JSON.parse(fs.readFileSync(file, 'utf-8')));
@@ -123,7 +155,10 @@ function loadSettings(file = settingsFile()) {
 }
 
 function saveSettings(settings, file = settingsFile()) {
-  const sanitized = sanitizeSettings({ ...readRaw(file), ...settings });
+  const disk = readRaw(file);
+  // 磁盘上的密钥单独传给 sanitize：界面这一次传回来的 apiKeys 是脱敏视图，
+  // 谁都没改的那几个源必须原样留着，不能被 "[object Object]" 顶掉。
+  const sanitized = sanitizeSettings({ ...disk, ...settings }, { existingKeys: disk.apiKeys || {} });
   const dir = path.dirname(file);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const tempFile = `${file}.tmp`;
@@ -143,7 +178,7 @@ function readRaw(file) {
 function redactSecrets(settings) {
   const apiKeys = {};
   for (const name of KEY_NAMES) {
-    const value = settings?.apiKeys?.[name];
+    const value = typeof settings?.apiKeys?.[name] === 'string' ? settings.apiKeys[name] : '';
     apiKeys[name] = value ? { configured: true, length: value.length } : { configured: false, length: 0 };
   }
   const { apiKeys: _omit, ...rest } = settings || {};
@@ -158,6 +193,7 @@ module.exports = {
   loadSettings,
   saveSettings,
   sanitizeSettings,
+  apiKeyInputError,
   settingsFile,
   resolveUserDataDir,
   redactSecrets,

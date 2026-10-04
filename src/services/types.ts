@@ -36,7 +36,6 @@ export interface ClassifiedError {
 }
 
 export type SourceStatus = 'searching' | 'ok' | 'empty' | 'failed' | 'unsupported';
-
 export interface SourceGroup {
   name: string;
   displayName: string;
@@ -62,6 +61,44 @@ export interface DownloadTask {
   fileName?: string;
   bytes?: number;
   error?: string;
+  /** 失败归类的下一步（"换一个可写目录"这种可执行出路） */
+  hint?: string;
+  kind?: string;
+  /** 重试了几次才落在这个状态 */
+  attempts?: number;
+}
+
+/** 已经落盘的一条素材文件（界面历史与 Agent 读同一份） */
+export interface DownloadLogEntry {
+  source: string;
+  sourceId: string;
+  title: string;
+  fileName: string;
+  filePath: string;
+  bytes: number;
+  license: string;
+  query?: string;
+  at?: string;
+  ms?: number;
+  exists: boolean;
+}
+
+/** 排队时被判定为重复的条目 */
+export interface SkippedItem {
+  source: string;
+  sourceId: string;
+  title: string;
+  reason: string;
+}
+
+export interface RecentDownload {
+  source: string;
+  sourceId: string;
+  fileName: string;
+  filePath: string;
+  bytes: number;
+  at: string;
+  exists: boolean;
 }
 
 export interface DownloadReceipt {
@@ -100,8 +137,16 @@ export interface SourceProbe {
   sample: { id: string; title: string; thumbnailUrl: string }[];
 }
 
+/** 密钥的脱敏视图：界面与所有接口只看得到"是否配置 + 长度"，永远拿不到值。 */
+export interface KeyState {
+  configured: boolean;
+  length: number;
+}
+
+export type KeyName = 'unsplash' | 'pexels' | 'pixabay' | 'giphy' | 'flickr';
+
 export interface AppSettings {
-  apiKeys: { unsplash: string; pexels: string; pixabay: string; giphy: string; flickr: string };
+  apiKeys: Record<KeyName, KeyState>;
   downloadDir: string;
   enabledSources: string[];
   theme: 'light' | 'dark';
@@ -111,8 +156,22 @@ export interface AppSettings {
   dedupe: boolean;
 }
 
-export interface SearchResponse {
-  items: AssetItem[];
+/** 保存时提交的结构：apiKeys 只读，改动走 apiKeyInput（空串=清除）。 */
+export interface SettingsUpdate extends Omit<AppSettings, 'apiKeys'> {
+  apiKeyInput: Partial<Record<KeyName, string>>;
+}
+
+/** 一批下载跑完后的汇总（界面下载面板与 Agent 用的是同一个形状） */
+export interface BatchSummary {
+  requested: number;
+  completed: number;
+  failed: { taskId: string; error: string; kind?: string; hint?: string }[];
+  cancelled: number;
+  bytes: number;
+  files: DownloadReceipt[];
+}
+
+export interface SearchResponse {  items: AssetItem[];
   groups: SourceGroup[];
   warnings: string[];
   deduped: number;

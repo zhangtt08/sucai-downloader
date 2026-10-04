@@ -28,6 +28,7 @@ interface Props {
   orientation: string;
   onlySource: string | null;
   dedupe: boolean;
+  allVisibleSelected: boolean;
   onSelect: (item: AssetItem, multi: boolean) => void;
   onDownload: (item: AssetItem) => void;
   onDownloadMany: (items: AssetItem[]) => void;
@@ -35,6 +36,7 @@ interface Props {
   onRetrySource: (name: string) => void;
   onProbe: (name: string) => void;
   onOpenSettings: () => void;
+  onSelectAllVisible: () => void;
   onOrientationChange: (value: 'all' | 'landscape' | 'portrait' | 'square') => void;
   onOnlySourceChange: (value: string | null) => void;
   onDedupeChange: (value: boolean) => void;
@@ -47,6 +49,9 @@ const orientations: { value: 'all' | 'landscape' | 'portrait' | 'square'; label:
   { value: 'square', label: '方图' },
 ];
 
+// 一次搜索可以聚合出上百条；全部铺开会卡，所以每屏先画这么多，剩下的按需展开。
+const RENDER_CAP = 48;
+
 const statusText: Record<SourceGroup['status'], string> = {
   searching: '检索中',
   ok: '',
@@ -58,14 +63,20 @@ const statusText: Record<SourceGroup['status'], string> = {
 export function ResultStream(props: Props) {
   const {
     items, totalItems, grouped, groups, plugins, probes, loading, searched, error, hasMore,
-    deduped, noResultReason, selected, orientation, onlySource, dedupe,
+    deduped, noResultReason, selected, orientation, onlySource, dedupe, allVisibleSelected,
     onSelect, onDownload, onDownloadMany, onLoadMore, onRetrySource, onProbe, onOpenSettings,
-    onOrientationChange, onOnlySourceChange, onDedupeChange,
+    onSelectAllVisible, onOrientationChange, onOnlySourceChange, onDedupeChange,
   } = props;
 
   const scrollRootRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+
+  // 换一次搜索就回到"每屏先画 48 张"的默认，不带上一轮的展开状态。
+  useEffect(() => {
+    if (!loading && items.length === 0) setExpanded(new Set());
+  }, [loading, items.length]);
 
   useEffect(() => {
     const sentinel = sentinelRef.current;
@@ -88,6 +99,12 @@ export function ResultStream(props: Props) {
   const filtersOn = orientation !== 'all' || !!onlySource || !dedupe;
 
   const toggleCollapse = (name: string) => setCollapsed((previous) => {
+    const next = new Set(previous);
+    next.has(name) ? next.delete(name) : next.add(name);
+    return next;
+  });
+
+  const toggleExpand = (name: string) => setExpanded((previous) => {
     const next = new Set(previous);
     next.has(name) ? next.delete(name) : next.add(name);
     return next;
@@ -139,6 +156,16 @@ export function ResultStream(props: Props) {
       <span className="text-[11px] tabular-nums text-muted">
         {totalItems === items.length ? `共 ${items.length} 项` : `筛选出 ${items.length} / ${totalItems} 项`}
       </span>
+      <button
+        className="button-secondary button-small"
+        disabled={items.length === 0}
+        onClick={onSelectAllVisible}
+        title={allVisibleSelected ? '取消当前视图里的全部选择' : '选中当前视图里的全部素材'}
+        type="button"
+      >
+        <CheckIcon className="size-3.5" />
+        {allVisibleSelected ? '取消全选' : `全选本屏 ${items.length}`}
+      </button>
     </div>
   );
 
@@ -229,6 +256,9 @@ export function ResultStream(props: Props) {
         const list = grouped.get(group.name) || [];
         if (!list.length && group.status !== 'ok') return null;
         const isCollapsed = collapsed.has(group.name);
+        const isExpanded = expanded.has(group.name);
+        const shown = isExpanded ? list : list.slice(0, RENDER_CAP);
+        const hidden = list.length - shown.length;
         return (
           <section className="source-section" key={group.name}>
             <header className="source-section-head">
@@ -258,12 +288,26 @@ export function ResultStream(props: Props) {
               </div>
             </header>
             {!isCollapsed && (
-              <AssetGrid
-                items={list}
-                onDownload={(item) => onDownload(item)}
-                onSelect={onSelect}
-                selected={selected}
-              />
+              <>
+                <AssetGrid
+                  items={shown}
+                  onDownload={onDownload}
+                  onSelect={onSelect}
+                  selected={selected}
+                />
+                {hidden > 0 && (
+                  <button
+                    className="button-secondary button-small mt-1"
+                    onClick={() => toggleExpand(group.name)}
+                    type="button"
+                  >
+                    展开这一组其余 {hidden} 项
+                  </button>
+                )}
+                {isExpanded && hidden === 0 && list.length > RENDER_CAP && (
+                  <button className="text-link" onClick={() => toggleExpand(group.name)} type="button">收起</button>
+                )}
+              </>
             )}
           </section>
         );
