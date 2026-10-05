@@ -7,11 +7,14 @@ const MEDIA_TYPES = new Set(['image', 'video', 'all']);
 function normalizeSearchInput(input = {}, settings = {}) {
   const query = String(input.query ?? '').trim().replace(/\s+/g, ' ').slice(0, 200);
   const mediaType = MEDIA_TYPES.has(input.mediaType) ? input.mediaType : 'image';
-  const page = Math.max(1, Math.min(Number(input.page) || 1, 100));
+  // 取整再夹范围：page=2.7 / perPage=24.5 原样传给平台就是无意义的查询参数
+  const page = Math.max(1, Math.min(Math.round(Number(input.page) || 1), 100));
   // 下界 3 不是随手写的：Pixabay 的 per_page < 3 会直接返回 [ERROR 400]。
-  const perPage = Math.max(3, Math.min(Number(input.perPage) || settings.pageSize || 24, 60));
+  const perPage = Math.max(3, Math.min(Math.round(Number(input.perPage) || settings.pageSize || 24), 60));
+  // null/undefined 要先滤掉再 String()：否则 String(null)='null' 是个"真值"，
+  // 会作为一个合法源名混进请求里（实测旧写法就是这么漏的）。
   const sources = Array.isArray(input.sources)
-    ? [...new Set(input.sources.map(String).filter(Boolean))].slice(0, 20)
+    ? [...new Set(input.sources.filter((name) => name !== undefined && name !== null).map((name) => String(name).trim()).filter(Boolean))].slice(0, 20)
     : [];
   return { query, mediaType, page, perPage, sources };
 }

@@ -282,4 +282,4 @@ function classifyError(err, { source, status, needsKey, configured } = {}) {
   return new SourceError('unknown', msg.slice(0, 160), { source });
 }
 
-module.exports = { KINDS, SourceError, classifyError, kindFromStatus, redactText };
+module.exports = { KINDS, FS_CODES, SourceError, classifyError, kindFromStatus, redactText };

@@ -30,6 +30,17 @@ function getPlugin(name) {
   return plugins.get(String(name)) || null;
 }
 
+// 注册/替换单个插件。initPluginRegistry 每次会清空整表，所以它只用于
+// 单测里注入假素材源（搜索与下载的分流、去重、失败归类都要能被测，而测试不许打真实素材平台），
+// 以及将来从配置动态挂载自定义源 —— 不是给业务代码开的第二条搜索路径。
+function registerPlugin(name, plugin) {
+  const key = String(name);
+  if (!key) throw new Error('注册素材源需要名字');
+  if (!plugin || typeof plugin.search !== 'function') throw new Error(`素材源 ${key} 必须实现 search()`);
+  plugins.set(key, plugin);
+  return key;
+}
+
 function getRegisteredPlugins() { return Array.from(plugins.values()); }
 
 function allPluginNames() { return Array.from(plugins.keys()); }
@@ -61,6 +72,7 @@ function describeSources() {
 module.exports = {
   initPluginRegistry,
   getPlugin,
+  registerPlugin,
   getRegisteredPlugins,
   allPluginNames,
   configuredPluginNames,
